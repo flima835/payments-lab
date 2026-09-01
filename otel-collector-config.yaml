@@ -1,52 +1,37 @@
 # =============================================================================
 # otel-collector-config.yaml
-# OTel Collector do lab "payments-simulator" - roda dentro do GKE (Deployment
-# k8s/base/otel-collector.yaml) e centraliza toda a telemetria:
-#   app payments-app (traces via OTLP) + nginx externo (vm-lab-brb-nginx) +
-#   payments-app/metrics.php (Prometheus) --> fan-out para:
-#     - Zabbix (Prometheus exporter :8889, PULL)
-#     - Google Cloud Trace / Cloud Monitoring (googlecloud exporter)
-#     - Datadog (datadog exporter)
+# OpenTelemetry Collector — configuração de produção para integração PULL com Zabbix
+# Alvo: GCP (Compute Engine / GKE), exportando métricas Prometheus na porta 8889
 # =============================================================================
 
 receivers:
+  # Recebe telemetria via OTLP gRPC (4317) e OTLP HTTP (4318) das aplicações
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
-
-  # Metricas de conexoes/requisicoes do nginx JA PROVISIONADO (vm-lab-brb-nginx).
-  # IMPORTANTE: como o Collector roda DENTRO do cluster GKE, "localhost" nao
-  # alcanca a VM externa - use o IP INTERNO da VPC (nic0). Requer:
-  #   1) modulo stub_status habilitado no nginx dessa VM
-  #   2) firewall liberando 10.0.0.0/8 -> tag http-server:80 (ver infra/terraform/main.tf)
+        
+  # Recebe as métricas de conexões e requisições do Nginx local
   nginx:
-    endpoint: "http://10.128.0.2/nginx_status"
+    endpoint: "http://localhost/nginx_status"
     collection_interval: 10s
 
-  # Raspa o endpoint de metricas de negocio da propria aplicacao de pagamentos
-  # (contadores de simulacoes), reaproveitando o mesmo Collector como hub unico.
-  prometheus:
-    config:
-      scrape_configs:
-        - job_name: "payments-app"
-          scrape_interval: 15s
-          metrics_path: /metrics.php
-          static_configs:
-            - targets: ["payments-service:80"]
-
 processors:
+  # Protege o Collector contra estouro de memória (obrigatório em produção)
   memory_limiter:
     check_interval: 5s
     limit_mib: 512
     spike_limit_mib: 128
 
+  # Agrupa dados antes de exportar, reduzindo overhead de rede
   batch:
     timeout: 10s
     send_batch_size: 1024
 
+  # Enriquece a telemetria com metadados da instância GCP (project_id, zone,
+  # instance_id, etc.) — útil para correlacionar métricas no Zabbix por host
   resourcedetection/gcp:
     detectors: [gcp]
     timeout: 10s
@@ -54,36 +39,43 @@ processors:
 
 exporters:
   # -------------------------------------------------------------------------
-  # Zabbix consome este endpoint via HTTP Agent (PULL) - ver zabbix_template_otel.json
+  # Exporter Prometheus — é este endpoint que o Zabbix fará o PULL via HTTP Agent
   # -------------------------------------------------------------------------
   prometheus:
     endpoint: 0.0.0.0:8889
     namespace: otelcol
     const_labels:
-      environment: lab-sre
+      environment: production
+    # Converte atributos de resource (ex.: service.name) em labels Prometheus
     resource_to_telemetry_conversion:
       enabled: true
     enable_open_metrics: true
     metric_expiration: 5m
-    # Seguranca minima: a exposicao externa da 8889 e feita via Service tipo
-    # LoadBalancer com loadBalancerSourceRanges restrito ao IP do Zabbix
-    # (k8s/base/otel-collector.yaml) - nao precisa de TLS/gcloud firewall manual.
+    # -----------------------------------------------------------------------
+    # SEGURANÇA MÍNIMA (GCP):
+    # O exporter Prometheus NÃO possui autenticação nativa (é um endpoint de
+    # scrape passivo). A segurança real deste endpoint é feita em duas camadas:
+    #   1. Regra de firewall na VPC restringindo a porta 8889 apenas ao IP do
+    #      Zabbix Server (ver guia de implementação, passo 2).
+    #   2. TLS opcional abaixo — recomendado se o tráfego cruzar sub-redes ou
+    #      sair da mesma VPC. Se o Collector e o Zabbix estiverem na mesma VPC
+    #      interna, pode ser removido para simplificar (o firewall já protege).
+    # -----------------------------------------------------------------------
+    # tls:
+    #   cert_file: /etc/otel/certs/otel-collector.crt
+    #   key_file: /etc/otel/certs/otel-collector.key
 
-  # Traces e metricas -> Cloud Trace / Cloud Monitoring
+  # Exporta traces/logs/métricas nativamente para o Cloud Monitoring/Trace/Logging
+  # (opcional — mantenha se quiser dupla observabilidade GCP + Zabbix)
   googlecloud:
     project: "${env:GCP_PROJECT_ID}"
 
-  # Traces e metricas -> Datadog (reaproveita o mesmo secret "datadog-secret"
-  # ja usado pelo DatadogAgent do Twitter-Clone)
-  datadog:
-    api:
-      key: "${env:DD_API_KEY}"
-      site: datadoghq.com
-
+  # Log local do próprio Collector (debug) — remova ou reduza verbosity em produção
   logging:
     verbosity: basic
 
 extensions:
+  # Endpoint de health check — pode ser usado como segundo item Zabbix (HTTP 200)
   health_check:
     endpoint: 0.0.0.0:13133
   pprof:
@@ -98,18 +90,21 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resourcedetection/gcp, batch]
-      exporters: [googlecloud, datadog, logging]
+      exporters: [googlecloud, logging]
 
     metrics:
-      receivers: [otlp, nginx, prometheus]
+      # ADICIONADO AQUI: O receiver 'nginx' agora faz parte da coleta de métricas
+      receivers: [otlp, nginx]
       processors: [memory_limiter, resourcedetection/gcp, batch]
-      exporters: [prometheus, googlecloud, datadog]
+      exporters: [prometheus, googlecloud]
 
     logs:
       receivers: [otlp]
       processors: [memory_limiter, resourcedetection/gcp, batch]
       exporters: [googlecloud, logging]
 
+  # Métricas internas do próprio Collector (otelcol_*) — é isso que o Zabbix
+  # vai consumir via /metrics na porta 8889 (self-telemetry + pipeline exportado)
   telemetry:
     metrics:
       address: 0.0.0.0:8888
