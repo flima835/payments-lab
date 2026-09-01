@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.107.0
+        args: ["--config=/etc/otel/otel-collector-config.yaml"]
+        ports:
+        - containerPort: 4317
+        - containerPort: 4318
+        - containerPort: 8889
+        - containerPort: 8888
+        env:
+        # Ajuste PROJECT_ID conforme infra/terraform/main.tf (var.project_id)
+        - name: GCP_PROJECT_ID
+          value: "PROJECT_ID"
+        # Reaproveita o MESMO secret ja usado pelo DatadogAgent (datadog-agent.yaml)
+        - name: DD_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: datadog-secret
+              key: api-key
+        volumeMounts:
+        - name: config
+          mountPath: /etc/otel
+      volumes:
+      - name: config
+        configMap:
+          name: otel-collector-config
+---
+# Service INTERNO: usado pelo payments-app para enviar traces via OTLP (4317/4318)
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+spec:
+  type: ClusterIP
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+    - name: otlp-http
+      port: 4318
+---
+# Service EXTERNO: expoe SOMENTE a porta 8889 (Prometheus) para o Zabbix.
+# loadBalancerSourceRanges = a propria regra de firewall, sem precisar de
+# "gcloud compute firewall-rules create" manual.
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector-metrics
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+    - "IP_DO_ZABBIX/32"   # <-- SUBSTITUA pelo IP real do Zabbix Server
+  selector:
+    app: otel-collector
+  ports:
+    - name: prometheus
+      port: 8889
+      targetPort: 8889

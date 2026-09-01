@@ -1,0 +1,231 @@
+{
+    "zabbix_export": {
+        "version": "6.4",
+        "template_groups": [
+            {
+                "uuid": "e685f0941a934a11a5903cb8321e25e3",
+                "name": "Templates/Observability"
+            }
+        ],
+        "templates": [
+            {
+                "uuid": "b19590fadbcb4de39c8ea61642a8b387",
+                "template": "Template OTel Collector via HTTP Agent",
+                "name": "Template OTel Collector via HTTP Agent",
+                "description": "Coleta PULL de metricas do OTel Collector (self-telemetry + nginx + app de pagamentos) via HTTP Agent + Prometheus exporter, sem scripts externos.",
+                "groups": [
+                    { "name": "Templates/Observability" }
+                ],
+                "macros": [
+                    { "macro": "{$OTEL.HOST}", "value": "127.0.0.1", "description": "IP do Service otel-collector-metrics (LoadBalancer, porta 8889)" },
+                    { "macro": "{$OTEL.PORT}", "value": "8889", "description": "Porta do exporter Prometheus do OTel Collector" },
+                    { "macro": "{$OTEL.SCHEME}", "value": "http", "description": "http ou https" },
+                    { "macro": "{$OTEL.TIMEOUT}", "value": "5s", "description": "Timeout da requisicao HTTP" },
+                    { "macro": "{$OTEL.ERROR.RATE.MAX}", "value": "5", "description": "Percentual maximo de falha no envio de spans antes de alertar" },
+                    { "macro": "{$OTEL.MEM.MAX}", "value": "1073741824", "description": "Limite de RSS do processo do Collector em bytes (default 1GB)" },
+                    { "macro": "{$PAY.ERROR.RATE.MAX}", "value": "10", "description": "Percentual maximo de simulacoes de pagamento com erro antes de alertar" }
+                ],
+                "items": [
+                    {
+                        "uuid": "d798a0c25e674e9280515c8e27c0f188",
+                        "name": "OTel Collector - Raw Prometheus Metrics",
+                        "type": "HTTP_AGENT",
+                        "key": "otel.metrics.raw",
+                        "delay": "1m",
+                        "history": "1h",
+                        "trends": "0",
+                        "value_type": "TEXT",
+                        "url": "{$OTEL.SCHEME}://{$OTEL.HOST}:{$OTEL.PORT}/metrics",
+                        "request_method": "GET",
+                        "timeout": "{$OTEL.TIMEOUT}",
+                        "status_codes": "200",
+                        "follow_redirects": "YES",
+                        "verify_peer": "NO",
+                        "verify_host": "NO",
+                        "description": "Item mestre: GET no endpoint /metrics do Collector (otelcol_*, nginx_* e payments_* juntos, ja que o Collector agora tambem raspa o nginx externo e o /metrics.php do app).",
+                        "preprocessing": [
+                            {
+                                "type": "JAVASCRIPT",
+                                "parameters": [
+                                    "var text = value;\n\nif (!text || text.length === 0) {\n    throw 'Resposta vazia do endpoint /metrics';\n}\n\nif (text.indexOf('<html') !== -1 || text.indexOf('<!DOCTYPE') !== -1) {\n    throw 'Resposta nao esta no formato Prometheus (HTML recebido - verifique proxy/LB/firewall)';\n}\n\nif (text.indexOf('otelcol_') === -1) {\n    throw 'Metricas do OTel Collector (prefixo otelcol_) nao encontradas na resposta';\n}\n\nreturn text;"
+                                ]
+                            }
+                        ],
+                        "tags": [
+                            { "tag": "component", "value": "otel-collector" }
+                        ]
+                    },
+                    {
+                        "uuid": "a2818c990df441bc91773e4b1a457494",
+                        "name": "OTel Collector - Uptime do processo",
+                        "type": "DEPENDENT",
+                        "key": "otel.collector.uptime",
+                        "value_type": "FLOAT",
+                        "units": "s",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "preprocessing": [
+                            { "type": "PROMETHEUS_PATTERN", "parameters": [ "otelcol_process_uptime", "value", "" ] }
+                        ],
+                        "tags": [ { "tag": "component", "value": "otel-collector" } ]
+                    },
+                    {
+                        "uuid": "f99c2738a15d4f048b1b10f7b15d2a6a",
+                        "name": "OTel Collector - Memoria RSS",
+                        "type": "DEPENDENT",
+                        "key": "otel.collector.memory.rss",
+                        "value_type": "UNSIGNED",
+                        "units": "B",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "preprocessing": [
+                            { "type": "PROMETHEUS_PATTERN", "parameters": [ "otelcol_process_memory_rss", "value", "" ] }
+                        ],
+                        "tags": [ { "tag": "component", "value": "otel-collector" } ]
+                    },
+                    {
+                        "uuid": "c42d3c5f301748f8b390e5559c5d1e8c",
+                        "name": "OTel Collector - Spans exportados (taxa/s)",
+                        "type": "DEPENDENT",
+                        "key": "otel.exporter.spans.sent.rate",
+                        "value_type": "FLOAT",
+                        "units": "spans/s",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "description": "Volume de traces (simulacoes de pagamento) processados pelo Collector.",
+                        "preprocessing": [
+                            { "type": "PROMETHEUS_PATTERN", "parameters": [ "otelcol_exporter_sent_spans_total", "function", "sum" ] },
+                            { "type": "CHANGE_PER_SECOND", "parameters": [ "" ] }
+                        ],
+                        "tags": [ { "tag": "component", "value": "otel-collector" } ]
+                    },
+                    {
+                        "uuid": "e1329c319c88466d9658ab1f28b23c21",
+                        "name": "OTel Collector - Falhas no envio de logs (taxa/s)",
+                        "type": "DEPENDENT",
+                        "key": "otel.exporter.logs.failed.rate",
+                        "value_type": "FLOAT",
+                        "units": "logs/s",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "preprocessing": [
+                            { "type": "PROMETHEUS_PATTERN", "parameters": [ "otelcol_exporter_send_failed_log_records_total", "function", "sum" ] },
+                            { "type": "CHANGE_PER_SECOND", "parameters": [ "" ] }
+                        ],
+                        "tags": [ { "tag": "component", "value": "otel-collector" } ]
+                    },
+                    {
+                        "uuid": "18f8c465927647a3834e4f7b6b1580f8",
+                        "name": "OTel Collector - Taxa de erro no envio de spans (%)",
+                        "type": "DEPENDENT",
+                        "key": "otel.exporter.spans.error_rate",
+                        "value_type": "FLOAT",
+                        "units": "%",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "description": "Calculo customizado via JavaScript: falha / (sucesso + falha) * 100.",
+                        "preprocessing": [
+                            {
+                                "type": "JAVASCRIPT",
+                                "parameters": [
+                                    "var text = value;\n\nfunction sumMetric(name) {\n    var re = new RegExp('^' + name + '(\\\\{[^}]*\\\\})?\\\\s+([0-9eE\\\\+\\\\-\\\\.]+)', 'gm');\n    var match;\n    var total = 0;\n    var found = false;\n    while ((match = re.exec(text)) !== null) {\n        total += parseFloat(match[2]);\n        found = true;\n    }\n    return found ? total : null;\n}\n\nvar sent = sumMetric('otelcol_exporter_sent_spans_total');\nvar failed = sumMetric('otelcol_exporter_send_failed_spans_total');\n\nif (sent === null) {\n    throw 'Metrica otelcol_exporter_sent_spans_total nao encontrada';\n}\n\nfailed = failed || 0;\nvar total = sent + failed;\n\nif (total === 0) {\n    return 0;\n}\n\nreturn ((failed / total) * 100).toFixed(2);"
+                                ]
+                            }
+                        ],
+                        "tags": [ { "tag": "component", "value": "otel-collector" } ]
+                    },
+                    {
+                        "uuid": "2f4a6b8c0d1e3f5a7b9c1d3e5f7a9b1c",
+                        "name": "Pagamentos - Total de simulacoes (taxa/s)",
+                        "type": "DEPENDENT",
+                        "key": "payments.total.rate",
+                        "value_type": "FLOAT",
+                        "units": "sim/s",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "description": "Vem de /metrics.php do payments-app, raspado pelo receiver 'prometheus' do Collector.",
+                        "preprocessing": [
+                            { "type": "PROMETHEUS_PATTERN", "parameters": [ "payments_total", "value", "" ] },
+                            { "type": "CHANGE_PER_SECOND", "parameters": [ "" ] }
+                        ],
+                        "tags": [ { "tag": "component", "value": "payments-app" } ]
+                    },
+                    {
+                        "uuid": "3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d",
+                        "name": "Pagamentos - Erros de simulacao (taxa/s)",
+                        "type": "DEPENDENT",
+                        "key": "payments.error.rate",
+                        "value_type": "FLOAT",
+                        "units": "sim/s",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "preprocessing": [
+                            { "type": "PROMETHEUS_PATTERN", "parameters": [ "payments_error_total", "value", "" ] },
+                            { "type": "CHANGE_PER_SECOND", "parameters": [ "" ] }
+                        ],
+                        "tags": [ { "tag": "component", "value": "payments-app" } ]
+                    },
+                    {
+                        "uuid": "4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d4e",
+                        "name": "Pagamentos - Valor total processado (BRL)",
+                        "type": "DEPENDENT",
+                        "key": "payments.amount.total",
+                        "value_type": "FLOAT",
+                        "units": "BRL",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "preprocessing": [
+                            { "type": "PROMETHEUS_PATTERN", "parameters": [ "payments_amount_total_brl", "value", "" ] }
+                        ],
+                        "tags": [ { "tag": "component", "value": "payments-app" } ]
+                    },
+                    {
+                        "uuid": "5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f",
+                        "name": "Pagamentos - Taxa de erro nas simulacoes (%)",
+                        "type": "DEPENDENT",
+                        "key": "payments.error_rate.percent",
+                        "value_type": "FLOAT",
+                        "units": "%",
+                        "master_item": { "key": "otel.metrics.raw" },
+                        "description": "Calculo customizado via JavaScript combinando payments_total e payments_error_total.",
+                        "preprocessing": [
+                            {
+                                "type": "JAVASCRIPT",
+                                "parameters": [
+                                    "var text = value;\n\nfunction readMetric(name) {\n    var re = new RegExp('^' + name + '\\\\s+([0-9eE\\\\+\\\\-\\\\.]+)', 'm');\n    var match = re.exec(text);\n    return match ? parseFloat(match[1]) : null;\n}\n\nvar total = readMetric('payments_total');\nvar erro = readMetric('payments_error_total');\n\nif (total === null) {\n    throw 'Metrica payments_total nao encontrada (o Collector ja conseguiu raspar /metrics.php do payments-app?)';\n}\n\nerro = erro || 0;\n\nif (total === 0) {\n    return 0;\n}\n\nreturn ((erro / total) * 100).toFixed(2);"
+                                ]
+                            }
+                        ],
+                        "tags": [ { "tag": "component", "value": "payments-app" } ]
+                    }
+                ],
+                "triggers": [
+                    {
+                        "uuid": "b86c8d7155a24a0e9271e28d447f526c",
+                        "name": "OTel Collector inacessivel em {HOST.NAME} (sem resposta em /metrics)",
+                        "expression": "nodata(/Template OTel Collector via HTTP Agent/otel.metrics.raw,5m)=1",
+                        "priority": "HIGH",
+                        "description": "Sem dados no item mestre ha mais de 5 minutos. Causas comuns: pod otel-collector fora do ar, Service otel-collector-metrics sem LoadBalancer pronto, ou loadBalancerSourceRanges bloqueando o IP do Zabbix.",
+                        "manual_close": "YES"
+                    },
+                    {
+                        "uuid": "f475b83986ab4a5ca55e503c2a16d8a4",
+                        "name": "Taxa alta de erro no envio de spans em {HOST.NAME} (> {$OTEL.ERROR.RATE.MAX}%)",
+                        "expression": "min(/Template OTel Collector via HTTP Agent/otel.exporter.spans.error_rate,5m)>{$OTEL.ERROR.RATE.MAX}",
+                        "priority": "AVERAGE",
+                        "description": "Collector falhando ao exportar spans. Verifique conectividade com Cloud Trace/Datadog e memory_limiter.",
+                        "manual_close": "YES"
+                    },
+                    {
+                        "uuid": "d601b058294749508b452cfc80b001a1",
+                        "name": "Uso de memoria elevado no OTel Collector em {HOST.NAME}",
+                        "expression": "avg(/Template OTel Collector via HTTP Agent/otel.collector.memory.rss,5m)>{$OTEL.MEM.MAX}",
+                        "priority": "WARNING",
+                        "description": "RSS do processo do Collector acima do limite configurado em {$OTEL.MEM.MAX}.",
+                        "manual_close": "YES"
+                    },
+                    {
+                        "uuid": "6d8e0f2a4b6c8d0e2f4a6b8c0d2e4f6a",
+                        "name": "Taxa alta de erro nas simulacoes de pagamento em {HOST.NAME} (> {$PAY.ERROR.RATE.MAX}%)",
+                        "expression": "min(/Template OTel Collector via HTTP Agent/payments.error_rate.percent,5m)>{$PAY.ERROR.RATE.MAX}",
+                        "priority": "AVERAGE",
+                        "description": "O app payments-simulator esta gerando mais erros de simulacao que o esperado. Verifique o pod payments-app e o mysql.",
+                        "manual_close": "YES"
+                    }
+                ]
+            }
+        ]
+    }
+}

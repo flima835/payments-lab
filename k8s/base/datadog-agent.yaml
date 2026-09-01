@@ -1,0 +1,68 @@
+apiVersion: "datadoghq.com/v2alpha1"
+kind: "DatadogAgent"
+metadata:
+  name: "datadog"
+  namespace: "datadog"
+  annotations:
+    agent.datadoghq.com/private-action-runner-enabled: "false"
+    cluster-agent.datadoghq.com/private-action-runner-enabled: "false"
+    agent.datadoghq.com/appsec.injector.enabled: "true"
+spec:
+  global:
+    clusterName: "gke_PROJECT_ID_us-central1-a_payments-lab-cluster"
+    site: "datadoghq.com"
+    credentials:
+      apiSecret:
+        secretName: "datadog-secret"
+        keyName: "api-key"
+      appSecret:
+        secretName: "datadog-secret"
+        keyName: "api-key"
+    tags:
+      - "env:lab-sre"
+  features:
+    clusterChecks:
+      enabled: true
+    orchestratorExplorer:
+      enabled: true
+    apm:
+      hostPortConfig:
+        enabled: true
+      instrumentation:
+        enabled: false
+    logCollection:
+      enabled: true
+      containerCollectAll: true
+    otelCollector:
+      enabled: true
+      ports:
+        - containerPort: 4317
+          hostPort: 4317
+          name: "otel-grpc"
+        - containerPort: 4318
+          hostPort: 4318
+          name: "otel-http"
+    asm:
+      threats:
+        enabled: true
+    cws:
+      enabled: true
+    cspm:
+      enabled: true
+    sbom:
+      enabled: true
+      containerImage:
+        enabled: true
+      host:
+        enabled: true
+    usm:
+      enabled: true
+    npm:
+      enabled: true
+    liveProcessCollection:
+      enabled: true
+    autoscaling:
+      workload:
+        enabled: true
+    eventCollection:
+      unbundleEvents: true

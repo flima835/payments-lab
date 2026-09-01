@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+data:
+  otel-collector-config.yaml: |
+    # =============================================================================
+    # otel-collector-config.yaml
+    # OTel Collector do lab "payments-simulator" - roda dentro do GKE (Deployment
+    # k8s/base/otel-collector.yaml) e centraliza toda a telemetria:
+    #   app payments-app (traces via OTLP) + nginx externo (vm-lab-brb-nginx) +
+    #   payments-app/metrics.php (Prometheus) --> fan-out para:
+    #     - Zabbix (Prometheus exporter :8889, PULL)
+    #     - Google Cloud Trace / Cloud Monitoring (googlecloud exporter)
+    #     - Datadog (datadog exporter)
+    # =============================================================================
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      # Metricas de conexoes/requisicoes do nginx JA PROVISIONADO (vm-lab-brb-nginx).
+      # IMPORTANTE: como o Collector roda DENTRO do cluster GKE, "localhost" nao
+      # alcanca a VM externa - use o IP INTERNO da VPC (nic0). Requer:
+      #   1) modulo stub_status habilitado no nginx dessa VM
+      #   2) firewall liberando 10.0.0.0/8 -> tag http-server:80 (ver infra/terraform/main.tf)
+      nginx:
+        endpoint: "http://10.128.0.2/nginx_status"
+        collection_interval: 10s
+
+      # Raspa o endpoint de metricas de negocio da propria aplicacao de pagamentos
+      # (contadores de simulacoes), reaproveitando o mesmo Collector como hub unico.
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: "payments-app"
+              scrape_interval: 15s
+              metrics_path: /metrics.php
+              static_configs:
+                - targets: ["payments-service:80"]
+
+    processors:
+      memory_limiter:
+        check_interval: 5s
+        limit_mib: 512
+        spike_limit_mib: 128
+
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+
+      resourcedetection/gcp:
+        detectors: [gcp]
+        timeout: 10s
+        override: false
+
+    exporters:
+      # -------------------------------------------------------------------------
+      # Zabbix consome este endpoint via HTTP Agent (PULL) - ver zabbix_template_otel.json
+      # -------------------------------------------------------------------------
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        namespace: otelcol
+        const_labels:
+          environment: lab-sre
+        resource_to_telemetry_conversion:
+          enabled: true
+        enable_open_metrics: true
+        metric_expiration: 5m
+        # Seguranca minima: a exposicao externa da 8889 e feita via Service tipo
+        # LoadBalancer com loadBalancerSourceRanges restrito ao IP do Zabbix
+        # (k8s/base/otel-collector.yaml) - nao precisa de TLS/gcloud firewall manual.
+
+      # Traces e metricas -> Cloud Trace / Cloud Monitoring
+      googlecloud:
+        project: "${env:GCP_PROJECT_ID}"
+
+      # Traces e metricas -> Datadog (reaproveita o mesmo secret "datadog-secret"
+      # ja usado pelo DatadogAgent do Twitter-Clone)
+      datadog:
+        api:
+          key: "${env:DD_API_KEY}"
+          site: datadoghq.com
+
+      logging:
+        verbosity: basic
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      pprof:
+        endpoint: localhost:1777
+      zpages:
+        endpoint: localhost:55679
+
+    service:
+      extensions: [health_check, pprof, zpages]
+
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resourcedetection/gcp, batch]
+          exporters: [googlecloud, datadog, logging]
+
+        metrics:
+          receivers: [otlp, nginx, prometheus]
+          processors: [memory_limiter, resourcedetection/gcp, batch]
+          exporters: [prometheus, googlecloud, datadog]
+
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, resourcedetection/gcp, batch]
+          exporters: [googlecloud, logging]
+
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+        logs:
+          level: info
+

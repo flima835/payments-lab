@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: payments-lab
+  namespace: argocd
+spec:
+  description: "Projeto ArgoCD do lab payments-simulator (OTel -> Zabbix/Cloud Trace/Datadog)"
+  sourceRepos:
+    - 'https://github.com/SEU_USUARIO/payments-lab.git'   # <-- SUBSTITUA
+  destinations:
+    - namespace: default
+      server: https://kubernetes.default.svc
+    - namespace: datadog
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace

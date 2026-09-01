@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Mesma logica do Twitter-Clone: sem 'namespace:' global, para preservar o
+# comportamento atual (app/mysql/otel-collector no default, datadog-agent no
+# namespace 'datadog', ja definido no proprio arquivo).
+resources:
+  - deployment.yaml
+  - mysql-deployment.yaml
+  - otel-collector-configmap.yaml
+  - otel-collector.yaml
+  - datadog-agent.yaml
